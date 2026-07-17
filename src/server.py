@@ -23,54 +23,57 @@ app.add_middleware(ApiKeyMiddleware)
 app.title = "Astry Booking Agent API"
 app.version = "1.0.0"
 app.description = """
-AI Booking Agent cho Astry POS — nhân viên salon gõ yêu cầu đặt lịch bằng ngôn ngữ tự nhiên,
-agent tự tra cứu dịch vụ/nhân viên/lịch trống và tạo/đổi/huỷ lịch hẹn qua REST API của
-`astry-pos-be` (agent không ghi thẳng database).
+AI Booking Agent for Astry POS — salon staff type booking requests in natural language, the
+agent looks up services/staff/availability and creates/reschedules/cancels appointments through
+`astry-pos-be`'s REST API (the agent never writes to the database directly).
 
-**Không có endpoint CRUD rời cho từng nghiệp vụ.** Mọi thao tác đều đi qua 1 trong 2 endpoint chat
-bên dưới (`/api/chat_sse` hoặc `/api/chat_poll`) bằng `message` dạng câu tiếng Việt tự nhiên —
-agent tự chọn tool bên trong (lookup_service, check_availability, create_appointment, ...).
+**There is no separate CRUD endpoint per business action.** Every operation goes through one of
+the two chat endpoints below (`/api/chat` or `/api/chat_poll`) with `message` as a natural
+language sentence — the agent picks the right tool internally (lookup_service,
+check_availability, create_appointment, ...).
 
-### Auth bắt buộc trên mọi route (trừ `/health`, `/docs`, `/redoc`, `/openapi.json`)
+### Auth required on every route (except `/health`, `/docs`, `/redoc`, `/openapi.json`)
 
-| Header | Giá trị | Mục đích |
+| Header | Value | Purpose |
 |---|---|---|
-| `X-API-Key` | `AGENT_API_KEY` (cấu hình ở `.env`) | Xác thực service-to-service — chỉ POS frontend/BFF được gọi vào agent |
-| `Authorization` | `Bearer <JWT của Staff>` | JWT thật do Keycloak cấp cho Staff đang đăng nhập, forward nguyên vẹn từ POS frontend — agent **không tự verify chữ ký**, chỉ decode payload rồi replay JWT này khi gọi ngược vào `astry-pos-be` |
+| `X-API-Key` | `AGENT_API_KEY` (configured in `.env`) | Service-to-service auth — only the POS frontend/BFF is allowed to call the agent |
+| `Authorization` | `Bearer <Staff JWT>` | The real JWT Keycloak issued to the logged-in Staff member, forwarded as-is from the POS frontend — the agent **does not verify the signature itself**, it only decodes the payload then replays this JWT when calling back into `astry-pos-be` |
 
-Thiếu `X-API-Key` → `401` JSON bình thường. Thiếu/sai `Authorization` → **không** trả `401` (vì
-`/api/chat_sse` là SSE, HTTP status luôn `200`) mà trả về 1 event lỗi trong stream, xem mô tả chi
-tiết ở endpoint `/api/chat_sse` bên dưới.
+Missing `X-API-Key` → a normal `401` JSON. Missing/invalid `Authorization` → **does not** return
+`401` (since `/api/chat` is SSE, the HTTP status is always `200`), instead an error event is sent
+in the stream — see the `/api/chat` endpoint description below for details.
 
-### Pattern confirm-gate (mọi thao tác GHI: tạo/đổi/huỷ lịch, thêm waitlist)
+### Confirm-gate pattern (every WRITE operation: create/reschedule/cancel appointment, join waitlist)
 
-Agent không bao giờ ghi dữ liệu ngay ở lượt chat đầu tiên:
+The agent never writes data on the very first chat turn:
 
-1. **Lượt 1** — Staff gõ yêu cầu → agent trả lời bằng câu hỏi xác nhận (preview), **chưa gọi** API
-   ghi nào tới `astry-pos-be`.
-2. **Lượt 2** — Staff xác nhận đồng ý (vd "đúng rồi", "ok") → client gửi tin nhắn này với **cùng
-   `conversation_id`** đã nhận ở lượt 1 → agent mới thật sự `POST`/`PATCH` vào `astry-pos-be`.
+1. **Turn 1** — Staff types a request → the agent replies with a confirmation question (preview),
+   **without calling** any write API on `astry-pos-be`.
+2. **Turn 2** — Staff confirms (e.g. "yes", "confirm") → the client sends this message with the
+   **same `conversation_id`** received in turn 1 → only then does the agent actually
+   `POST`/`PATCH` `astry-pos-be`.
 
-→ Client tích hợp chỉ cần 1 luồng chat bình thường, nhớ forward `conversation_id` giữa các lượt —
-không cần tự dựng UI xác nhận riêng.
+→ Integrating clients just need a normal chat flow, remembering to forward `conversation_id`
+between turns — no need to build a separate confirmation UI.
 
-Xem thêm ví dụ `curl`/JavaScript đầy đủ tại [`docs/API.md`](https://github.com/TechJTeam/astry-booking-agent/blob/master/docs/API.md).
+See full `curl`/JavaScript examples in [`docs/API.md`](https://github.com/TechJTeam/astry-booking-agent/blob/master/docs/API.md).
 """
 app.openapi_tags = [
-    {"name": "Chat", "description": "Endpoint chính — mọi nghiệp vụ đặt lịch đi qua đây bằng ngôn ngữ tự nhiên."},
-    {"name": "Health", "description": "Healthcheck, không cần auth."},
+    {"name": "Chat", "description": "Main endpoint — every booking operation goes through here in natural language."},
+    {"name": "Health", "description": "Healthcheck, no auth required."},
 ]
 
-# VannaFastAPIServer.create_app() đã tự đăng ký sẵn:
-#   - GET /health (trả {"service": "vanna"}, không đúng ý agent này)
-#   - POST/WS /api/vanna/v2/chat_sse, chat_poll, chat_websocket (path mặc định của framework vanna)
-# Route đăng ký trước thắng trong Starlette nên phải xoá route cũ trước khi thêm route thay thế:
-# đổi /health theo response riêng, và rút gọn path /api/vanna/v2/* -> /api/* (giữ nguyên
-# chat_handler bên dưới, không đổi hành vi, chỉ đổi URL).
+# VannaFastAPIServer.create_app() already registers by default:
+#   - GET /health (returns {"service": "vanna"}, not what this agent wants)
+#   - POST/WS /api/vanna/v2/chat_sse, chat_poll, chat_websocket (the vanna framework's default paths)
+# The first route registered wins in Starlette, so old routes must be removed before adding
+# replacements: override /health with our own response, and shorten /api/vanna/v2/* -> /api/*
+# (chat_sse also renamed to plain /api/chat) — same chat_handler underneath, no behavior change,
+# only the URL changes.
 #
-# Lưu ý: trang demo UI mặc định của vanna ở GET / (widget CDN) hardcode gọi path
-# /api/vanna/v2/chat_sse cũ nên sẽ không hoạt động sau khi đổi path — chấp nhận được vì client
-# thật của agent này là POS frontend (gọi thẳng /api/chat_sse), không phải trang demo đó.
+# Note: vanna's default demo UI at GET / (CDN widget) hardcodes the old /api/vanna/v2/chat_sse
+# path, so it will stop working after this rename — acceptable since this agent's real client is
+# the POS frontend (calling /api/chat directly), not that demo page.
 app.router.routes = [
     r
     for r in app.router.routes
@@ -78,9 +81,9 @@ app.router.routes = [
 ]
 
 
-@app.get("/health", tags=["Health"], summary="Kiểm tra service còn sống")
+@app.get("/health", tags=["Health"], summary="Check whether the service is alive")
 async def health():
-    """Dùng cho Docker `HEALTHCHECK` / load balancer. Không cần header auth nào."""
+    """Used for Docker `HEALTHCHECK` / load balancers. No auth header required."""
     return {"status": "ok", "service": "astry-booking-agent"}
 
 
@@ -98,54 +101,72 @@ def _build_request_context(chat_request: ChatRequest, http_request: Request) -> 
 
 
 @app.post(
-    "/api/chat_sse",
+    "/api/chat",
     tags=["Chat"],
-    summary="Chat với Booking Agent — streaming (Server-Sent Events)",
+    summary="Chat with the Booking Agent — streaming (Server-Sent Events)",
     description="""
-Endpoint chính. Gửi `message` (câu tiếng Việt tự nhiên), nhận về stream các sự kiện SSE.
+Main endpoint. Send `message` (a natural-language sentence), receive back a stream of SSE events.
 
 **Request body**
 ```json
-{ "message": "Cắt tóc cho khách tên Lan lúc 3h chiều mai", "conversation_id": "..." }
+{ "message": "Book a haircut for Lan tomorrow at 3pm", "conversation_id": "..." }
 ```
-- `conversation_id`: bỏ trống ở tin nhắn đầu tiên; các lượt sau **phải** truyền lại đúng id đã
-  nhận được ở response trước đó, để agent nhớ ngữ cảnh (bắt buộc cho pattern confirm-gate).
+- `conversation_id`: omit on the first message; subsequent turns **must** pass back the exact id
+  received in the previous response, so the agent keeps context (required for the confirm-gate
+  pattern).
 
-**Response** — `text/event-stream`, mỗi dòng:
+**Response** — `text/event-stream`, each line:
 ```
 data: {"rich": {...}, "simple": {"text": "..."}, "conversation_id": "...", "request_id": "...", "timestamp": 173...}
 ```
-kết thúc bằng `data: [DONE]`. Đọc `simple.text` (nếu có) để hiển thị dạng chat thường.
+terminated by `data: [DONE]`. Read `simple.text` (if present) to render a plain chat bubble.
 
-**Sự kiện lỗi** (kể cả thiếu `Authorization: Bearer <JWT>`) — HTTP status vẫn `200`, nhưng stream
-chỉ có 1 event và **không có `[DONE]`**:
+**Error events** (including a missing `Authorization: Bearer <JWT>`) — HTTP status stays `200`,
+but the stream only has 1 event and **no `[DONE]`**:
 ```
 data: {"type": "error", "data": {"message": "..."}, "conversation_id": "", "request_id": ""}
 ```
-Client phải tự kiểm tra `"type": "error"` trong từng chunk, không thể dựa vào HTTP status code.
+Clients must check for `"type": "error"` in each chunk themselves, they cannot rely on the HTTP
+status code.
 
-Ví dụ `curl` (`-N` để không buffer):
+`curl` example (`-N` disables buffering):
 ```bash
-curl -N -X POST http://localhost:8200/api/chat_sse \\
+curl -N -X POST http://localhost:8200/api/chat \\
   -H "Content-Type: application/json" \\
   -H "X-API-Key: <AGENT_API_KEY>" \\
-  -H "Authorization: Bearer <JWT của Staff>" \\
-  -d '{"message": "Cắt tóc cho khách tên Lan lúc 3h chiều mai"}'
+  -H "Authorization: Bearer <Staff JWT>" \\
+  -d '{"message": "Book a haircut for Lan tomorrow at 3pm"}'
 ```
 
-Chi tiết pattern confirm-gate 2 lượt + ví dụ JavaScript (`fetch` + `ReadableStream`) xem
-[`docs/API.md`](https://github.com/TechJTeam/astry-booking-agent/blob/master/docs/API.md).
+See [`docs/API.md`](https://github.com/TechJTeam/astry-booking-agent/blob/master/docs/API.md) for
+the full confirm-gate 2-turn walkthrough and a JavaScript (`fetch` + `ReadableStream`) example.
 """,
     responses={
         200: {
-            "description": "SSE stream (xem mô tả) — Swagger UI hiện nguyên khối text, không stream trực quan.",
+            "description": "SSE stream (see description) — Swagger UI shows it as one raw text blob, not a live stream.",
             "content": {
                 "text/event-stream": {
-                    "example": 'data: {"rich": {"text": "Xác nhận đặt lịch: khách Lan, 15:00 mai. Đúng không?"}, '
-                    '"simple": {"text": "Xác nhận đặt lịch: khách Lan, 15:00 mai. Đúng không?"}, '
+                    "example": 'data: {"rich": {"text": "Confirm booking: customer Lan, 3:00pm tomorrow. Correct?"}, '
+                    '"simple": {"text": "Confirm booking: customer Lan, 3:00pm tomorrow. Correct?"}, '
                     '"conversation_id": "conv_ab12cd34", "request_id": "..."}\n\ndata: [DONE]\n\n'
                 }
             },
+        }
+    },
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    # request_context/metadata intentionally omitted here — clients don't need to
+                    # fill this in, the server builds the real request_context from the actual
+                    # HTTP request's headers/cookies (see _build_request_context below), so
+                    # anything sent for this field in the body is fully overwritten anyway.
+                    "example": {
+                        "message": "Book a haircut for Lan tomorrow at 3pm",
+                        "conversation_id": None,
+                    }
+                }
+            }
         }
     },
 )
@@ -182,13 +203,26 @@ async def chat_sse(chat_request: ChatRequest, http_request: Request) -> Streamin
 @app.post(
     "/api/chat_poll",
     tags=["Chat"],
-    summary="Chat với Booking Agent — polling (không stream)",
+    summary="Chat with the Booking Agent — polling (no streaming)",
     description="""
-Cùng body/auth như `/api/chat_sse`, nhưng đợi agent trả lời **xong hoàn toàn** rồi mới trả về 1
-JSON đầy đủ (không stream) — dùng khi client không tiện xử lý SSE. Chậm hơn UX so với `chat_sse`.
+Same body/auth as `/api/chat`, but waits for the agent to **finish completely** before returning
+one full JSON response (no streaming) — use when the client can't easily handle SSE. Worse UX
+latency than `/api/chat`.
 
 Response: `{"chunks": [...], "conversation_id": "...", "request_id": "...", "total_chunks": N}`.
 """,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "message": "Book a haircut for Lan tomorrow at 3pm",
+                        "conversation_id": None,
+                    }
+                }
+            }
+        }
+    },
 )
 async def chat_poll(chat_request: ChatRequest, http_request: Request) -> ChatResponse:
     """Polling endpoint for chat."""
@@ -202,9 +236,9 @@ async def chat_poll(chat_request: ChatRequest, http_request: Request) -> ChatRes
 
 @app.websocket("/api/chat_websocket")
 async def chat_websocket(websocket: WebSocket) -> None:
-    """WebSocket endpoint for real-time chat (không hiện trong Swagger — OpenAPI không mô tả WS).
+    """WebSocket endpoint for real-time chat (not shown in Swagger — OpenAPI can't describe WS).
 
-    Body mỗi lượt gửi lên giống hệt `/api/chat_sse`: `{"message": "...", "conversation_id": "..."}`.
+    Body sent on each turn is identical to `/api/chat`: `{"message": "...", "conversation_id": "..."}`.
     """
     await websocket.accept()
 

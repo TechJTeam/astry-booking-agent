@@ -40,9 +40,9 @@ paths, so they're viewable without `X-API-Key`:
 - ReDoc: `http://localhost:8200/redoc`
 - OpenAPI JSON: `http://localhost:8200/openapi.json`
 
-Only the real routes show up: `POST /api/chat_sse`, `POST /api/chat_poll`, `GET /health` (the
+Only the real routes show up: `POST /api/chat`, `POST /api/chat_poll`, `GET /health` (the
 WebSocket route isn't represented in OpenAPI). "Try it out" does issue a real request, but since
-`chat_sse` returns SSE, the response shows up as one raw `data: {...}` blob instead of a live
+`chat` returns SSE, the response shows up as one raw `data: {...}` blob instead of a live
 stream — good enough for a quick header/body sanity check, not a place to build a real chat UI.
 
 ## 2. `GET /health`
@@ -57,12 +57,12 @@ curl http://localhost:8200/health
 { "status": "ok", "service": "astry-booking-agent" }
 ```
 
-## 3. `POST /api/chat_sse` — main endpoint (Server-Sent Events)
+## 3. `POST /api/chat` — main endpoint (Server-Sent Events)
 
 ### 3.1 Request
 
 ```
-POST /api/chat_sse
+POST /api/chat
 Content-Type: application/json
 X-API-Key: <AGENT_API_KEY>
 Authorization: Bearer <Staff JWT>
@@ -120,7 +120,7 @@ stop, don't wait for `[DONE]`.
 ### 3.4 `curl` example
 
 ```bash
-curl -N -X POST http://localhost:8200/api/chat_sse \
+curl -N -X POST http://localhost:8200/api/chat \
   -H "Content-Type: application/json" \
   -H "X-API-Key: dev-astry-booking-to-db-agent-key" \
   -H "Authorization: Bearer $STAFF_JWT" \
@@ -135,7 +135,7 @@ curl -N -X POST http://localhost:8200/api/chat_sse \
 read the stream manually instead of `EventSource`:
 
 ```js
-const res = await fetch('http://localhost:8200/api/chat_sse', {
+const res = await fetch('http://localhost:8200/api/chat', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
@@ -177,10 +177,10 @@ while (true) {
 
 | Endpoint | Method | Notes |
 |---|---|---|
-| `/api/chat_poll` | POST | Same body as `chat_sse`, but returns one full JSON response instead of streaming — use when the client can't easily handle SSE. Worse UX latency since it waits for the agent to finish completely. |
-| `/api/chat_websocket` | WS | Equivalent to `chat_sse` over WebSocket, send JSON `{"message": "...", "conversation_id": "..."}` per turn. |
+| `/api/chat_poll` | POST | Same body as `chat`, but returns one full JSON response instead of streaming — use when the client can't easily handle SSE. Worse UX latency since it waits for the agent to finish completely. |
+| `/api/chat_websocket` | WS | Equivalent to `chat` over WebSocket, send JSON `{"message": "...", "conversation_id": "..."}` per turn. |
 
-Body/auth are identical to `chat_sse` (`chat_poll` accepts `X-API-Key` + `Authorization` headers
+Body/auth are identical to `chat` (`chat_poll` accepts `X-API-Key` + `Authorization` headers
 normally; `chat_websocket` receives cookies/headers at handshake time).
 
 ## 5. Confirm-gate pattern — every WRITE operation (create/reschedule/cancel appointments, join waitlist)
@@ -204,18 +204,18 @@ turns:
 `conversation_id`) — no need to build a separate confirmation UI, the agent asks for confirmation
 in natural language itself.
 
-## 6. Full example flow (2 HTTP `chat_sse` turns)
+## 6. Full example flow (2 HTTP `chat` turns)
 
 ```bash
 # Turn 1 — no conversation_id
-curl -N -X POST http://localhost:8200/api/chat_sse \
+curl -N -X POST http://localhost:8200/api/chat \
   -H "Content-Type: application/json" -H "X-API-Key: $AGENT_API_KEY" \
   -H "Authorization: Bearer $STAFF_JWT" \
   -d '{"message": "Book a haircut for Lan tomorrow at 3pm"}'
 # -> agent asks for confirmation, returns conversation_id="abc-123" in every chunk
 
 # Turn 2 — must pass back the conversation_id received above
-curl -N -X POST http://localhost:8200/api/chat_sse \
+curl -N -X POST http://localhost:8200/api/chat \
   -H "Content-Type: application/json" -H "X-API-Key: $AGENT_API_KEY" \
   -H "Authorization: Bearer $STAFF_JWT" \
   -d '{"message": "Confirm", "conversation_id": "abc-123"}'
@@ -225,14 +225,14 @@ curl -N -X POST http://localhost:8200/api/chat_sse \
 ## 7. Integration notes
 
 - **There's no separate REST endpoint per business action** (no `POST
-  /agent/create-appointment`-style route) — everything goes through `chat_sse`/`chat_poll`/
+  /agent/create-appointment`-style route) — everything goes through `chat`/`chat_poll`/
   `chat_websocket` in natural language. To make the agent do something, phrase it as a `message`.
 - **`conversation_id` must be remembered client-side** across turns of the same conversation — the
   agent has no other way to link context together.
 - If the Staff's JWT expires mid-conversation, the verification failure happens on the
   `astry-pos-be` side when the agent calls back into it (usually surfaced as a tool returning
   `error: pos_api_error` with a 401 message in the reply body, not as an HTTP 401 at the
-  `chat_sse` layer). Clients should check JWT expiry themselves before calling.
+  `chat` layer). Clients should check JWT expiry themselves before calling.
 - By default (`CONVERSATION_STORE_URL` unset), conversation history is stored **in-RAM** and lost
   on agent restart — clients shouldn't treat `conversation_id` as durable across deploys unless
   that variable is set (see [README.md](../README.md), "Conversation store" section).
