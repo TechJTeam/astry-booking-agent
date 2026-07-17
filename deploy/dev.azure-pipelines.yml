@@ -2,9 +2,13 @@
 #   image astry/booking-agent-dev · variable group Astry-Booking-Agent-Dev
 #   /u01/astry/booking-agent · shared-network · host port 8200
 #
+# Unlike astry-pos-be's dev pipeline (which assumes /u01/astry/pos-be already exists from a prior
+# manual setup), this pipeline creates its target dir and writes docker-compose.yml itself every
+# run (same idea as astry-pos-be's uat.azure-pipelines.yml) — first-ever deploy needs nothing
+# pre-created on the VM beyond the shared-network Docker network.
+#
 # Assumes (create once in Azure DevOps / on the VM before first run):
 #   - Variable group "Astry-Booking-Agent-Dev" with all vars referenced in the "Write .env file" step
-#   - /u01/astry/booking-agent/docker-compose.yml already present on the VM (copy of deploy/docker-compose.yml)
 #   - docker network shared-network already created on the VM (shared with astry-pos-be)
 trigger:
   branches:
@@ -101,10 +105,11 @@ stages:
             deploy:
               steps:
                 - task: Bash@3
-                  displayName: 'Write .env file'
+                  displayName: 'Write .env and docker-compose.yml'
                   inputs:
                     targetType: 'inline'
                     script: |
+                      mkdir -p /u01/astry/booking-agent
                       cat > /u01/astry/booking-agent/.env << 'ENVEOF'
                       AZURE_ENDPOINT=$(AZURE_ENDPOINT)
                       AZURE_API_KEY=$(AZURE_API_KEY)
@@ -116,6 +121,31 @@ stages:
                       AGENT_SERVER_PORT=8200
                       CONVERSATION_STORE_URL=$(CONVERSATION_STORE_URL)
                       ENVEOF
+
+                      cat > /u01/astry/booking-agent/docker-compose.yml << 'YMLEOF'
+                      name: booking-agent
+                      services:
+                        booking-agent:
+                          image: linkwave.azurecr.io/astry/booking-agent-dev:latest
+                          container_name: astry-booking-agent
+                          env_file: .env
+                          ports:
+                            - "8200:8200"
+                          restart: unless-stopped
+                          extra_hosts:
+                            - "host.docker.internal:host-gateway"
+                          networks:
+                            - shared-network
+                          healthcheck:
+                            test: ["CMD", "curl", "-f", "http://127.0.0.1:8200/health"]
+                            interval: 30s
+                            timeout: 10s
+                            retries: 5
+                            start_period: 60s
+                      networks:
+                        shared-network:
+                          external: true
+                      YMLEOF
                   env:
                     AZURE_API_KEY: $(AZURE_API_KEY)
                     POS_INTERNAL_API_KEY: $(POS_INTERNAL_API_KEY)

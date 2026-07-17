@@ -1,7 +1,7 @@
-# Deploy-target compose file for the Dev VM. Copy this once to /u01/astry/booking-agent/docker-compose.yml
-# on the VM (same convention as astry-pos-be: deploy/docker-compose.yml is the file that lives
-# next to .env on the host — deploy/dev.azure-pipelines.yml only writes .env and runs
-# `docker compose pull && up -d` against it, it does not regenerate this file on every run).
+# Reference copy of the deploy-target compose file for the Dev VM. deploy/dev.azure-pipelines.yml
+# writes this exact content to /u01/astry/booking-agent/docker-compose.yml on every deploy (via
+# the "Write .env and docker-compose.yml" step) — nothing needs to be copied manually. Keep this
+# file in sync with that heredoc if you change one, update the other.
 #
 # Requires (one-time, same host as astry-pos-be):
 #   docker network create shared-network   # if not already created by astry-pos-be/DB-Agent
