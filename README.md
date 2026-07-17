@@ -94,7 +94,7 @@ uvicorn src.server:app --reload --port 8200
 ```
 
 - `GET /health` → `{"status": "ok", "service": "astry-booking-agent"}`
-- `POST /api/vanna/v2/chat_sse` → endpoint chat chính (SSE), body `{"message": "...", "conversation_id": "..."}`,
+- `POST /api/chat_sse` → endpoint chat chính (SSE), body `{"message": "...", "conversation_id": "..."}`,
   header bắt buộc `Authorization: Bearer <JWT của Staff>` (và `X-API-Key: <AGENT_API_KEY>` nếu đã set).
 
 ## Test
