@@ -105,17 +105,40 @@ data: [DONE]
 - Clients can just read `simple.text` (if present) or aggregate text from `rich` to render a
   plain chat bubble.
 
-### 3.3 Error events in the stream
+### 3.3 Errors during processing (including a missing/invalid JWT)
 
-When an exception occurs (including a missing JWT — section 1), the server yields **one error
-event** and closes the stream **without a `[DONE]`**:
+Verified by testing against a live server — this differs from what you'd guess just from reading
+the route code, because `vanna`'s `Agent.send_message()` wraps the entire per-message pipeline
+(including user resolution, i.e. reading the `Authorization` header) in its own try/except and
+**never lets the exception reach the SSE route handler**. So a missing/invalid Staff JWT does
+**not** produce a distinct `{"type": "error", ...}` SSE event — it produces a **normal-looking
+chunk sequence that still ends with `[DONE]`**, HTTP status `200`:
 
 ```
-data: {"type": "error", "data": {"message": "Thiếu Authorization: Bearer <JWT>. POS frontend phải forward nguyên JWT của Staff đang đăng nhập khi gọi vào agent."}, "conversation_id": "", "request_id": ""}
+data: {"rich": {"id": "...", "type": "status_card", "data": {"title": "Error Processing Message", "status": "error", "description": "An unexpected error occurred while processing your message. Please try again.\n\nConversation ID: conv_...", "icon": "⚠️"}}, "simple": {"type": "text", "text": "Error: An unexpected error occurred. Please try again. (Conversation ID: conv_...)"}, "conversation_id": "conv_...", "request_id": "..."}
+
+data: {"rich": {"id": "vanna-status-bar", "type": "status_bar_update", "data": {"status": "error", "message": "Error occurred", "detail": "An unexpected error occurred while processing your message"}}, "simple": null, "conversation_id": "conv_...", "request_id": "..."}
+
+data: {"rich": {"id": "vanna-chat-input", "type": "chat_input_update", "data": {"placeholder": "Try again...", "disabled": false}}, "simple": null, "conversation_id": "conv_...", "request_id": "..."}
+
+data: [DONE]
 ```
 
-Clients should: read each `data:` line, and if it parses to `"type": "error"` → show the error and
-stop, don't wait for `[DONE]`.
+Important consequences:
+- **The message shown to the client is always this generic text**, regardless of the actual cause
+  (missing JWT, expired JWT, a tool crashing, an LLM API error...) — the specific reason (e.g.
+  "Missing Authorization: Bearer \<JWT\>") is only written to the **server's own logs**
+  (`logger.error(...)` inside `vanna`, plus this project's `traceback.print_exc()`), never sent to
+  the client. Don't rely on `simple.text`/`rich` content to distinguish error causes on the client
+  side — if you need that, check the server logs instead, or add your own client-side JWT expiry
+  check before calling (see section 7).
+- **Detecting an error client-side**: check for a `rich.type === "status_card"` chunk with
+  `rich.data.status === "error"` (or `simple.text` starting with `"Error:"`). There is no
+  top-level `"type": "error"` field to check — that would only appear if something failed
+  *outside* `Agent.send_message` itself (e.g. serializing a chunk), which is rare in practice; if
+  it does happen, the stream closes **without** `[DONE]`, so as a general rule clients should
+  treat "connection closed with no `[DONE]` chunk" as an error too, not just look for a specific
+  chunk shape.
 
 ### 3.4 `curl` example
 

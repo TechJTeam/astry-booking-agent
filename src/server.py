@@ -4,8 +4,9 @@ import traceback
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import HTTPException, Request, Security, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from vanna.core.user.request_context import RequestContext
 from vanna.servers.base import ChatRequest, ChatResponse
 from vanna.servers.fastapi import VannaFastAPIServer
@@ -40,8 +41,8 @@ check_availability, create_appointment, ...).
 | `Authorization` | `Bearer <Staff JWT>` | The real JWT Keycloak issued to the logged-in Staff member, forwarded as-is from the POS frontend — the agent **does not verify the signature itself**, it only decodes the payload then replays this JWT when calling back into `astry-pos-be` |
 
 Missing `X-API-Key` → a normal `401` JSON. Missing/invalid `Authorization` → **does not** return
-`401` (since `/api/chat` is SSE, the HTTP status is always `200`), instead an error event is sent
-in the stream — see the `/api/chat` endpoint description below for details.
+`401` — the HTTP status is always `200`, and the agent replies with a generic in-chat error
+message instead — see the `/api/chat` endpoint description below for the exact chunk shape.
 
 ### Confirm-gate pattern (every WRITE operation: create/reschedule/cancel appointment, join waitlist)
 
@@ -89,6 +90,18 @@ async def health():
 
 chat_handler = _server_wrapper.chat_handler
 
+# OpenAPI security schemes — documentation-only. Real enforcement stays entirely in
+# ApiKeyMiddleware/JwtForwardUserResolver; these dependencies exist purely so Swagger UI renders
+# an "Authorize" button with input fields for the two required headers instead of leaving the
+# user no way to set them via "Try it out" (auto_error=False so a missing/invalid value here
+# never short-circuits the request — the middleware still returns the real 401).
+_api_key_scheme = APIKeyHeader(
+    name="X-API-Key", auto_error=False, description="Value of AGENT_API_KEY (service-to-service auth)."
+)
+_bearer_scheme = HTTPBearer(
+    auto_error=False, description="Staff JWT forwarded as-is from the POS frontend (not verified by the agent)."
+)
+
 
 def _build_request_context(chat_request: ChatRequest, http_request: Request) -> RequestContext:
     return RequestContext(
@@ -121,13 +134,14 @@ data: {"rich": {...}, "simple": {"text": "..."}, "conversation_id": "...", "requ
 ```
 terminated by `data: [DONE]`. Read `simple.text` (if present) to render a plain chat bubble.
 
-**Error events** (including a missing `Authorization: Bearer <JWT>`) — HTTP status stays `200`,
-but the stream only has 1 event and **no `[DONE]`**:
-```
-data: {"type": "error", "data": {"message": "..."}, "conversation_id": "", "request_id": ""}
-```
-Clients must check for `"type": "error"` in each chunk themselves, they cannot rely on the HTTP
-status code.
+**Errors during processing** (including a missing/invalid `Authorization: Bearer <JWT>`) — HTTP
+status stays `200`. `vanna`'s `Agent.send_message()` catches these internally and yields a normal
+chunk sequence (a `status_card` component with `data.status == "error"`, then a status bar update,
+then a chat-input update) that still ends with `data: [DONE]` — it does **not** produce a
+`{"type": "error", ...}` event. The text shown is always a generic
+"An unexpected error occurred..." message; the real cause is only in server-side logs, never sent
+to the client. See [`docs/API.md`](https://github.com/TechJTeam/astry-booking-agent/blob/master/docs/API.md)
+section 3.3 for the full chunk shapes and how to detect this client-side.
 
 `curl` example (`-N` disables buffering):
 ```bash
@@ -170,7 +184,12 @@ the full confirm-gate 2-turn walkthrough and a JavaScript (`fetch` + `ReadableSt
         }
     },
 )
-async def chat_sse(chat_request: ChatRequest, http_request: Request) -> StreamingResponse:
+async def chat_sse(
+    chat_request: ChatRequest,
+    http_request: Request,
+    _x_api_key: str = Security(_api_key_scheme),
+    _authorization: HTTPAuthorizationCredentials = Security(_bearer_scheme),
+) -> StreamingResponse:
     """Server-Sent Events endpoint for streaming chat."""
     chat_request.request_context = _build_request_context(chat_request, http_request)
 
@@ -224,7 +243,12 @@ Response: `{"chunks": [...], "conversation_id": "...", "request_id": "...", "tot
         }
     },
 )
-async def chat_poll(chat_request: ChatRequest, http_request: Request) -> ChatResponse:
+async def chat_poll(
+    chat_request: ChatRequest,
+    http_request: Request,
+    _x_api_key: str = Security(_api_key_scheme),
+    _authorization: HTTPAuthorizationCredentials = Security(_bearer_scheme),
+) -> ChatResponse:
     """Polling endpoint for chat."""
     chat_request.request_context = _build_request_context(chat_request, http_request)
     try:
