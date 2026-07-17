@@ -1,0 +1,39 @@
+# astry-booking-agent — service độc lập, đứng cạnh astry-pos-be, KHÔNG ghi thẳng DB của nó.
+# astry-pos-be (hoặc POS frontend/BFF) gọi vào agent qua HTTP, forward Bearer JWT của Staff.
+#
+# Yêu cầu:
+#   docker network create shared-network   # một lần, nếu chưa có
+#
+# Chạy:
+#   cp .env.example .env   # điền AZURE_*, POS_API_BASE_URL, AGENT_API_KEY, POS_INTERNAL_API_KEY
+#   docker compose up -d --build
+name: astry-booking-agent
+
+services:
+  booking-agent:
+    build:
+      context: .
+      dockerfile: deploy/dev.Dockerfile
+    image: astry-booking-agent:latest
+    container_name: astry-booking-agent
+    restart: unless-stopped
+    ports:
+      - '8200:8200'
+    env_file:
+      - .env
+    environment:
+      AGENT_SERVER_PORT: '8200'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    networks:
+      - shared-network
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:8200/health']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  shared-network:
+    external: true

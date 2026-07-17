@@ -1,0 +1,136 @@
+# Dev pipeline — mirrors astry-pos-be/deploy/dev.azure-pipelines.yml:
+#   image astry/booking-agent-dev · variable group Astry-Booking-Agent-Dev
+#   /u01/astry/booking-agent · shared-network · host port 8200
+#
+# Assumes (create once in Azure DevOps / on the VM before first run):
+#   - Variable group "Astry-Booking-Agent-Dev" with all vars referenced in the "Write .env file" step
+#   - /u01/astry/booking-agent/docker-compose.yml already present on the VM (copy of deploy/docker-compose.yml)
+#   - docker network shared-network already created on the VM (shared with astry-pos-be)
+trigger:
+  branches:
+    include:
+      - develop
+pr:
+  branches:
+    include:
+      - develop
+
+resources:
+  - repo: self
+
+variables:
+  - group: ACR Secret
+  - group: Astry-Booking-Agent-Dev
+  - name: dockerRegistryServiceConnection
+    value: '03fa0a60-dfe0-4954-b98f-42e23a6552e5'
+  - name: containerRegistry
+    value: 'linkwave.azurecr.io'
+  - name: imageRepository
+    value: 'astry/booking-agent-dev'
+  - name: dockerfilePath
+    value: '$(Build.SourcesDirectory)/deploy/dev.Dockerfile'
+  - name: tag
+    value: '$(Build.BuildId)'
+  - name: vmImageName
+    value: 'ubuntu-latest'
+
+stages:
+  - stage: BuildAndPush
+    displayName: Build and push stage
+    jobs:
+      - job: BuildAndPush
+        displayName: Build and Push
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: Bash@3
+            name: setImageVersion
+            displayName: 'Generate Tag'
+            inputs:
+              targetType: 'inline'
+              script: |
+                BRANCH_PREFIX="${BUILD_SOURCEBRANCHNAME:0:3}"
+                TIMESTAMP=$(date +%Y%m%d)
+                RANDOM_SUFFIX=$(openssl rand -hex 2)
+                GENERATED_TAG="$BRANCH_PREFIX-$TIMESTAMP-$RANDOM_SUFFIX"
+                echo "Generated tag: $GENERATED_TAG"
+                echo "##vso[task.setvariable variable=IMAGE_TAG;isOutput=true]$GENERATED_TAG"
+
+          - script: echo "Current tag is $(setImageVersion.IMAGE_TAG)"
+            displayName: 'Print Image Tag'
+
+          - task: Docker@2
+            displayName: 'Build Docker image'
+            inputs:
+              command: build
+              repository: $(imageRepository)
+              dockerfile: $(dockerfilePath)
+              containerRegistry: $(dockerRegistryServiceConnection)
+              buildContext: '$(Build.SourcesDirectory)'
+              tags: |
+                $(setImageVersion.IMAGE_TAG)
+                latest
+
+          - task: Docker@2
+            displayName: Push image
+            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+            inputs:
+              command: push
+              repository: $(imageRepository)
+              containerRegistry: $(dockerRegistryServiceConnection)
+              tags: |
+                $(setImageVersion.IMAGE_TAG)
+                latest
+
+  - stage: DeployToDev
+    displayName: Deploy to Dev
+    dependsOn: BuildAndPush
+    variables:
+      IMAGE_TAG: latest
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: Deployment
+        pool:
+          vmImage: $(vmImageName)
+        displayName: Deploy to Dev VM
+        environment:
+          name: 'linkwave-as-dev-southeast-asia'
+          resourceType: virtualMachine
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: Bash@3
+                  displayName: 'Write .env file'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      cat > /u01/astry/booking-agent/.env << 'ENVEOF'
+                      AZURE_ENDPOINT=$(AZURE_ENDPOINT)
+                      AZURE_API_KEY=$(AZURE_API_KEY)
+                      AZURE_GPT_5_2_DEPLOYMENT=$(AZURE_GPT_5_2_DEPLOYMENT)
+                      AZURE_API_VERSION=$(AZURE_API_VERSION)
+                      POS_API_BASE_URL=$(POS_API_BASE_URL)
+                      POS_INTERNAL_API_KEY=$(POS_INTERNAL_API_KEY)
+                      AGENT_API_KEY=$(AGENT_API_KEY)
+                      AGENT_SERVER_PORT=8200
+                      CONVERSATION_STORE_URL=$(CONVERSATION_STORE_URL)
+                      ENVEOF
+                  env:
+                    AZURE_API_KEY: $(AZURE_API_KEY)
+                    POS_INTERNAL_API_KEY: $(POS_INTERNAL_API_KEY)
+                    AGENT_API_KEY: $(AGENT_API_KEY)
+                    CONVERSATION_STORE_URL: $(CONVERSATION_STORE_URL)
+
+                - task: Bash@3
+                  displayName: 'Pull and deploy'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      sudo docker login $(containerRegistry) -u $(acr-username) -p $(acr-password)
+
+                      cd /u01/astry/booking-agent
+                      sudo docker compose pull
+                      sudo docker compose up -d
+                  env:
+                    containerRegistry: $(containerRegistry)

@@ -1,0 +1,31 @@
+# Deploy-target compose file for the Dev VM. Copy this once to /u01/astry/booking-agent/docker-compose.yml
+# on the VM (same convention as astry-pos-be: deploy/docker-compose.yml is the file that lives
+# next to .env on the host — deploy/dev.azure-pipelines.yml only writes .env and runs
+# `docker compose pull && up -d` against it, it does not regenerate this file on every run).
+#
+# Requires (one-time, same host as astry-pos-be):
+#   docker network create shared-network   # if not already created by astry-pos-be/DB-Agent
+name: booking-agent
+
+services:
+  booking-agent:
+    image: linkwave.azurecr.io/astry/booking-agent-dev:latest
+    container_name: astry-booking-agent
+    env_file: .env
+    ports:
+      - '8200:8200'
+    restart: unless-stopped
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    networks:
+      - shared-network
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:8200/health']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  shared-network:
+    external: true
